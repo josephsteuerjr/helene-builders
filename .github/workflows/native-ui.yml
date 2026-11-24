@@ -1,0 +1,72 @@
+name: Released profile windows
+on:
+  push:
+    branches: ['codex/h300-final-native-2411']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(contains(github.event.head_commit.message, '[linux]') && '[{"target":"debian","runner":"ubuntu-24.04","asset":"Helene-3.0.0-linux-x86_64.zip"},{"target":"fedora","runner":"ubuntu-24.04","asset":"Helene-3.0.0-fedora-x86_64.zip"}]' || contains(github.event.head_commit.message, '[arm]') && '[{"target":"server-arm","runner":"ubuntu-24.04-arm","asset":"Helene-3.0.0-server-linux-arm64.zip"}]' || '[{"target":"windows","runner":"windows-2025","asset":"Helene-3.0.0.zip"},{"target":"mac-arm","runner":"macos-15","asset":"Helene-3.0.0-macos-arm64.zip"},{"target":"mac-intel","runner":"macos-26-intel","asset":"Helene-3.0.0-macos-x86_64.zip"},{"target":"debian","runner":"ubuntu-24.04","asset":"Helene-3.0.0-linux-x86_64.zip"},{"target":"fedora","runner":"ubuntu-24.04","asset":"Helene-3.0.0-fedora-x86_64.zip"},{"target":"server-arm","runner":"ubuntu-24.04-arm","asset":"Helene-3.0.0-server-linux-arm64.zip"}]') }}
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.target }}
+    timeout-minutes: 28
+    env:
+      TARGET: ${{ matrix.target }}
+      ASSET: ${{ matrix.asset }}
+      PYTHONUTF8: '1'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Stage a clean acceptance stand
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p stand/evidence
+          cp ui_*.py ui_linux.sh stand/
+          case "$TARGET" in
+            windows) slug=windows-x86_64;; mac-arm) slug=macos-arm64;; mac-intel) slug=macos-x86_64;;
+            debian) slug=debian-x86_64;; fedora) slug=fedora-x86_64;; server-arm) slug=server-linux-arm64;;
+          esac
+          artifact=helene-$slug
+          for attempt in $(seq 1 80); do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/45305262981/artifacts" --jq '.artifacts[].name' | grep -Fxq "$artifact"; then break; fi
+            sleep 10
+          done
+          gh run download 45305262981 --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir stand/artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Native window
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          cd stand
+          if [ "$RUNNER_OS" = Windows ]; then python ui_prepare.py "$TARGET"; desktop/runtime/python.exe -Bu ui_stand.py "$TARGET";
+          else python3 ui_prepare.py "$TARGET"; desktop/runtime/bin/python3 -Bu ui_stand.py "$TARGET"; fi
+      - name: Distribution native window
+        if: matrix.target == 'debian' || matrix.target == 'fedora'
+        shell: bash
+        run: |
+          case "$TARGET" in debian) image=debian:bookworm;; fedora) image=fedora:44;; esac
+          docker run --rm --shm-size=1g --security-opt seccomp=unconfined -v "$PWD/stand:/stand" "$image" sh /stand/ui_linux.sh "$TARGET"
+      - name: Native server control
+        if: matrix.target == 'server-arm'
+        shell: bash
+        run: |
+          cd stand
+          python3 ui_prepare.py "$TARGET"
+          sudo python3 -Bu ui_arm.py
+      - name: Evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-${{ matrix.target }}
+          path: stand/evidence/
+          retention-days: 7
